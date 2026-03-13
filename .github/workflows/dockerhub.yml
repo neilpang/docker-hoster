@@ -12,10 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Checkout
-        uses: actions/checkout@v2
+      - name: checkout code
+        uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Get Docker tags for Alpine based image
         id: docker_meta_alpine

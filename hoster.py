@@ -61,27 +61,28 @@ def get_container_data(dockerClient, container_id):
     info = dockerClient.inspect_container(container_id)
     container_hostname = info["Config"]["Hostname"]
     container_name = info["Name"].strip("/")
-    container_ip = info["NetworkSettings"]["IPAddress"]
+    container_ip = info["NetworkSettings"].get("IPAddress", "")
     if not container_ip:
-        if info["HostConfig"] and info["HostConfig"]["NetworkMode"] and info["HostConfig"]["NetworkMode"].startswith("container:"):
+        if info.get("HostConfig") and info["HostConfig"].get("NetworkMode", "").startswith("container:"):
             pid = info["HostConfig"]["NetworkMode"][10:]
             pinfo = dockerClient.inspect_container(pid)
             info = pinfo
-        elif info["HostConfig"] and info["HostConfig"]["NetworkMode"] and info["HostConfig"]["NetworkMode"] == "host":
+        elif info.get("HostConfig") and info["HostConfig"].get("NetworkMode") == "host":
             container_ip = "127.0.0.1"
 
-    if info["Config"]["Domainname"]:
+    if info["Config"].get("Domainname"):
         container_hostname = container_hostname + "." + info["Config"]["Domainname"]
     
     result = []
 
-    for values in info["NetworkSettings"]["Networks"].values():
+    networks = info["NetworkSettings"].get("Networks") or {}
+    for values in networks.values():
         
-        if not values["Aliases"]: 
+        if not values.get("Aliases"): 
             continue
 
         result.append({
-                "ip": values["IPAddress"] , 
+                "ip": values.get("IPAddress", "") , 
                 "name": container_name,
                 "domains": set(values["Aliases"] + [container_name, container_hostname])
             })

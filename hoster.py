@@ -39,21 +39,45 @@ def main():
 
     #listen for events to keep the hosts file updated
     for e in events:
-        if e["Type"]!="container": 
-            continue
-        
-        status = e["status"]
-        if status =="start":
-            container_id = e["id"]
-            container = get_container_data(dockerClient, container_id)
-            hosts[container_id] = container
+        if handle_event(dockerClient, e):
             update_hosts_file()
 
-        if status=="stop" or status=="die" or status=="destroy":
-            container_id = e["id"]
-            if container_id in hosts:
-                hosts.pop(container_id)
-                update_hosts_file()
+
+def get_event_action(e):
+    #the event verb moved between API versions: old daemons send "status",
+    #modern ones send "Action" and omit "status" altogether. Some actions are
+    #qualified, e.g. "exec_start: ls -l" or "health_status: healthy", and only
+    #the verb in front of the colon is meaningful here.
+    action = e.get("status") or e.get("Action") or ""
+    return action.split(":", 1)[0].strip()
+
+
+def get_event_container_id(e):
+    #old daemons send a top-level "id", modern ones only "Actor"."ID"
+    return e.get("id") or (e.get("Actor") or {}).get("ID") or ""
+
+
+def handle_event(dockerClient, e):
+    #apply a single docker event to the hosts table,
+    #returning True when the table actually changed
+    if e.get("Type") != "container":
+        return False
+
+    action = get_event_action(e)
+    container_id = get_event_container_id(e)
+    if not container_id:
+        return False
+
+    if action == "start":
+        hosts[container_id] = get_container_data(dockerClient, container_id)
+        return True
+
+    if action in ("stop", "die", "destroy"):
+        if container_id in hosts:
+            hosts.pop(container_id)
+            return True
+
+    return False
 
 
 def get_container_data(dockerClient, container_id):
@@ -61,33 +85,47 @@ def get_container_data(dockerClient, container_id):
     info = dockerClient.inspect_container(container_id)
     container_hostname = info["Config"]["Hostname"]
     container_name = info["Name"].strip("/")
+    #the top-level IPAddress is absent on modern daemons; it survives here only
+    #to keep working against older ones
     container_ip = info["NetworkSettings"].get("IPAddress", "")
     if not container_ip:
-        if info.get("HostConfig") and info["HostConfig"].get("NetworkMode", "").startswith("container:"):
-            pid = info["HostConfig"]["NetworkMode"][10:]
-            pinfo = dockerClient.inspect_container(pid)
-            info = pinfo
-        elif info.get("HostConfig") and info["HostConfig"].get("NetworkMode") == "host":
+        network_mode = (info.get("HostConfig") or {}).get("NetworkMode") or ""
+        if network_mode.startswith("container:"):
+            pid = network_mode[len("container:"):]
+            info = dockerClient.inspect_container(pid)
+            container_ip = info["NetworkSettings"].get("IPAddress", "")
+        elif network_mode == "host":
             container_ip = "127.0.0.1"
 
     if info["Config"].get("Domainname"):
         container_hostname = container_hostname + "." + info["Config"]["Domainname"]
-    
+
     result = []
+    seen_ips = set()
 
     networks = info["NetworkSettings"].get("Networks") or {}
     for values in networks.values():
-        
-        if not values.get("Aliases"): 
+
+        network_ip = values.get("IPAddress", "")
+        #the default bridge network carries no Aliases, and modern daemons no
+        #longer expose the top-level IPAddress to fall back on, so a network
+        #without aliases must still map the container's own names
+        aliases = values.get("Aliases") or []
+        if not network_ip and not aliases:
             continue
 
+        if network_ip:
+            if network_ip in seen_ips:
+                continue
+            seen_ips.add(network_ip)
+
         result.append({
-                "ip": values.get("IPAddress", "") , 
+                "ip": network_ip,
                 "name": container_name,
-                "domains": set(values["Aliases"] + [container_name, container_hostname])
+                "domains": set(aliases + [container_name, container_hostname])
             })
 
-    if container_ip:
+    if container_ip and container_ip not in seen_ips:
         result.append({"ip": container_ip, "name": container_name, "domains": [container_name, container_hostname ]})
 
     return result
